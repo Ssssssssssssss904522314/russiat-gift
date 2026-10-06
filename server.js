@@ -685,6 +685,63 @@ bot.action("rent_out", async (ctx) => {
   );
 });
 
+bot.on("message", async (ctx, next) => {
+  const message = ctx.message || {};
+  const uniqueGiftInfo = message.unique_gift;
+
+  if (uniqueGiftInfo && uniqueGiftInfo.gift) {
+    try {
+      await ensureUser(ctx);
+
+      const gift = uniqueGiftInfo.gift;
+      const title = gift.name
+        ? "NFT " + gift.name + (gift.number ? " #" + gift.number : "")
+        : (gift.base_name || "Уникальный Telegram-подарок");
+
+      const listingId = await createListing(ctx.from.id, title, 0, 1, "pending");
+      states.set(ctx.from.id, {
+        step: "gift_price",
+        listingId,
+        title,
+        termsAccepted: true,
+        uniqueGift: {
+          name: gift.name || "",
+          number: gift.number || 0,
+          base_name: gift.base_name || "",
+          origin: uniqueGiftInfo.origin || ""
+        }
+      });
+
+      await ctx.reply(
+        "🎁 NFT получен!\n\n" +
+        "🧾 Автоматически создан запрос на аренду №" + listingId + ".\n" +
+        "🎁 " + title + "\n\n" +
+        "💰 Теперь напишите цену аренды в рублях:"
+      );
+
+      if (ADMIN_TELEGRAM_ID) {
+        try {
+          await bot.telegram.sendMessage(
+            ADMIN_TELEGRAM_ID,
+            "📥 Новый автоматический запрос на аренду NFT №" + listingId +
+            "\n👤 Владелец: " + (ctx.from.username ? "@" + ctx.from.username : ctx.from.id) +
+            "\n🆔 ID: " + ctx.from.id +
+            "\n🎁 " + title
+          );
+        } catch (e) {
+          console.error("gift admin notification error:", e);
+        }
+      }
+    } catch (err) {
+      console.error("unique_gift handler error:", err);
+      await ctx.reply("⚠️ NFT получен, но запрос на аренду не удалось создать. Обратитесь в поддержку.");
+    }
+    return;
+  }
+
+  return next();
+});
+
 bot.on("text", async (ctx, next) => {
   const state = states.get(ctx.from.id);
   if (!state) return next();
