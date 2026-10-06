@@ -815,6 +815,49 @@ bot.on("text", async (ctx, next) => {
     try{await bot.telegram.sendMessage(String(r.renter_id),`🔄 По аренде №${n} оформлен возврат NFT. Ожидайте дальнейших действий поддержки.`);}catch(e){}
     return;
   }
+  if (state.step === "gift_price") {
+    const price = Number(text.replace(",", "."));
+    if (!Number.isFinite(price) || price <= 0) {
+      await ctx.reply("❌ Введите корректную цену, например: 150");
+      return;
+    }
+    state.price = price;
+    state.step = "gift_duration";
+    await ctx.reply("📅 Теперь напишите срок аренды в днях, например: 1, 7 или 30:");
+    return;
+  }
+
+  if (state.step === "gift_duration") {
+    const days = Number(text);
+    if (!Number.isInteger(days) || days <= 0 || days > 365) {
+      await ctx.reply("❌ Введите целое число дней от 1 до 365.");
+      return;
+    }
+
+    const ok = await activateListing(state.listingId, state.price, days);
+    if (!ok) {
+      states.delete(ctx.from.id);
+      await ctx.reply("❌ Запрос на аренду уже обработан или недоступен. Обратитесь в поддержку.");
+      return;
+    }
+
+    const listingId = state.listingId;
+    const title = state.title;
+    const price = state.price;
+    states.delete(ctx.from.id);
+
+    await ctx.reply(
+      "✅ NFT автоматически добавлен в запрос на аренду!\n\n" +
+      "🧾 Запрос №" + listingId + "\n" +
+      "🎁 " + title + "\n" +
+      "💰 Цена: " + price.toFixed(2) + " ₽\n" +
+      "📅 Срок: " + days + " д.\n\n" +
+      "Теперь его можно арендовать из каталога.",
+      mainKeyboard()
+    );
+    return;
+  }
+
   if (state.step === "title") {
     state.title = text.slice(0, 100);
     state.step = "price";
