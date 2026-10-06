@@ -173,26 +173,23 @@ async function initDb() {
   const migrations = [
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS id BIGINT`,
     `CREATE SEQUENCE IF NOT EXISTS users_id_seq AS BIGINT`,
-    `DO $m$ DECLARE id_type TEXT; max_id BIGINT; BEGIN
+    `DO $m$ DECLARE id_type TEXT; BEGIN
        SELECT format_type(a.atttypid, a.atttypmod)
        INTO id_type
        FROM pg_attribute a
-       WHERE a.attrelid = 'users'::regclass AND a.attname = 'id' AND NOT a.attisdropped;
+       WHERE a.attrelid = 'users'::regclass
+         AND a.attname = 'id'
+         AND NOT a.attisdropped;
 
-       IF id_type NOT IN ('integer','bigint') THEN
-         EXECUTE 'ALTER TABLE users ALTER COLUMN id DROP DEFAULT';
-         EXECUTE 'ALTER TABLE users ALTER COLUMN id DROP NOT NULL';
-         EXECUTE 'ALTER TABLE users ALTER COLUMN id TYPE BIGINT USING CASE WHEN trim(id::text) <> '''' AND translate(trim(id::text), ''0123456789'', '''') = '''' THEN trim(id::text)::bigint ELSE NULL END';
-         id_type := 'bigint';
+       IF id_type IN ('integer','bigint') THEN
+         EXECUTE 'UPDATE users SET id = nextval(''users_id_seq'')::' || id_type || ' WHERE id IS NULL';
+         EXECUTE 'ALTER TABLE users ALTER COLUMN id SET DEFAULT nextval(''users_id_seq'')::' || id_type;
+       ELSIF id_type = 'text' THEN
+         EXECUTE 'UPDATE users SET id = nextval(''users_id_seq'')::text WHERE id IS NULL';
+         EXECUTE 'ALTER TABLE users ALTER COLUMN id SET DEFAULT nextval(''users_id_seq'')::text';
        END IF;
-
-       EXECUTE 'UPDATE users SET id = nextval(''users_id_seq'')::' || id_type || ' WHERE id IS NULL';
-       EXECUTE 'SELECT COALESCE(MAX(id), 0) FROM users' INTO max_id;
-       IF max_id < 1 THEN max_id := 1; END IF;
-       PERFORM setval(''users_id_seq'', max_id, true);
-       EXECUTE 'ALTER TABLE users ALTER COLUMN id SET DEFAULT nextval(''users_id_seq'')::' || id_type;
-       EXECUTE 'ALTER TABLE users ALTER COLUMN id SET NOT NULL';
     END $m$`,
+    `SELECT setval('users_id_seq', GREATEST(COALESCE((SELECT MAX(id)::bigint FROM users WHERE id::text ~ '^[0-9]+$'), 0::bigint), 1::bigint), true)`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id BIGINT`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS balance NUMERIC(18,2) NOT NULL DEFAULT 0`,
