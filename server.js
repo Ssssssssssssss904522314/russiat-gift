@@ -113,7 +113,10 @@ async function initDb() {
       status TEXT NOT NULL DEFAULT 'pending',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-  `);
+  `);  await dbQuery(`ALTER TABLE users ADD COLUMN IF NOT EXISTS stars_balance NUMERIC(18,2) NOT NULL DEFAULT 0`);
+  await dbQuery(`ALTER TABLE users ADD COLUMN IF NOT EXISTS warnings INTEGER NOT NULL DEFAULT 0`);
+  await dbQuery(`ALTER TABLE users ADD COLUMN IF NOT EXISTS blocked BOOLEAN NOT NULL DEFAULT FALSE`);
+
 }
 
 async function ensureUser(ctx) {
@@ -734,6 +737,12 @@ bot.action("withdraw", async (ctx) => {
   await ctx.editMessageText(
     `💸 Вывод средств\n\nДоступно: ${balance.toFixed(2)} ₽\n\nВведите сумму вывода:`
   );
+});
+
+bot.command("admin", async (ctx) => {
+  if (!adminOnly(ctx)) return;
+  states.set(ctx.from.id, { step: "admin_password" });
+  await ctx.reply("🔐 Введите пароль для доступа к админ-панели:");
 });
 
 bot.command("withdrawals", async (ctx) => {
