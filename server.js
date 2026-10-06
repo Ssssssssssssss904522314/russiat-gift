@@ -173,9 +173,17 @@ async function initDb() {
   const migrations = [
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS id BIGINT`,
     `CREATE SEQUENCE IF NOT EXISTS users_id_seq AS BIGINT`,
-    `UPDATE users SET id = nextval('users_id_seq') WHERE id IS NULL`,
-    `SELECT setval('users_id_seq', COALESCE((SELECT MAX(id) FROM users), 0::bigint) + 1::bigint, false)`,
-    `ALTER TABLE users ALTER COLUMN id SET DEFAULT nextval('users_id_seq')`,
+    `DO $ DECLARE id_type TEXT; BEGIN
+       SELECT format_type(a.atttypid, a.atttypmod)
+       INTO id_type
+       FROM pg_attribute a
+       WHERE a.attrelid = 'users'::regclass AND a.attname = 'id' AND NOT a.attisdropped;
+       IF id_type IN ('integer','bigint') THEN
+         EXECUTE 'UPDATE users SET id = nextval(''users_id_seq'')::' || id_type || ' WHERE id IS NULL';
+         EXECUTE 'ALTER TABLE users ALTER COLUMN id SET DEFAULT nextval(''users_id_seq'')::' || id_type;
+       END IF;
+    END $`,
+    `SELECT setval('users_id_seq', GREATEST(COALESCE((SELECT MAX(id)::bigint FROM users), 0::bigint), 1::bigint), true)`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id BIGINT`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS balance NUMERIC(18,2) NOT NULL DEFAULT 0`,
