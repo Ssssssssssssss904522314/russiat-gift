@@ -1,6 +1,8 @@
 const express = require("express");
 const { Telegraf } = require("telegraf");
 const { Pool } = require("pg");
+const path = require("path");
+const fs = require("fs");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_TELEGRAM_ID = process.env.ADMIN_TELEGRAM_ID || "";
@@ -32,6 +34,12 @@ async function getMedia(key) {
 async function sendVisual(ctx, key, text, extra = {}) {
   const media = await getMedia(key);
   if (media) return ctx.replyWithPhoto(media, { caption: text, ...extra });
+
+  const defaultArtwork = path.join(__dirname, "media", "russiat-gift-ui.jpg");
+  if (fs.existsSync(defaultArtwork)) {
+    return ctx.replyWithPhoto({ source: defaultArtwork }, { caption: text, ...extra });
+  }
+
   return ctx.reply(text, extra);
 }
 
