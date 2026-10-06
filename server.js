@@ -282,6 +282,39 @@ function termsText() {
 Нажимая «Я ознакомился с условиями», вы подтверждаете, что прочитали и принимаете эти правила.`;
 }
 
+function rentalInstructionText() {
+  return `📦 Как сдать NFT / подарок в аренду
+
+Перед созданием объявления сначала передайте подарок боту.
+
+🎁 Как передать подарок:
+1. Откройте свой Telegram-подарок в профиле.
+2. Нажмите кнопку действий с подарком.
+3. Выберите действие передачи/отправки подарка.
+4. В качестве получателя выберите этого бота.
+5. После передачи вернитесь сюда и нажмите «✅ Подарок передан боту».
+
+⚠️ Важно:
+• Передавайте только тот подарок, которым вы действительно владеете.
+• Не отправляйте пароль, код входа, код подтверждения или другие секретные данные.
+• Если Telegram не показывает возможность передать этот подарок боту, не пытайтесь обходить ограничения — обратитесь в поддержку.
+• Не размещайте один и тот же подарок одновременно в другом месте.
+
+После этого бот попросит название, цену и срок аренды.`;
+}
+
+function rentalInstructionKeyboard() {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "✅ Подарок передан боту", callback_data: "continue_rent" }],
+        [{ text: "📜 Условия сдачи NFT", callback_data: "terms" }],
+        [{ text: "◀️ Назад", callback_data: "home" }]
+      ]
+    }
+  };
+}
+
 function mainKeyboard() {
   return {
     reply_markup: {
@@ -315,9 +348,19 @@ bot.action("terms", async (ctx) => {
 bot.action("accept_terms", async (ctx) => {
   await ctx.answerCbQuery("Условия приняты");
   await ensureUser(ctx);
+  states.set(ctx.from.id, { step: "awaiting_gift", termsAccepted: true });
+  await ctx.editMessageText(
+    "✅ Условия приняты.\n\n" + rentalInstructionText(),
+    rentalInstructionKeyboard()
+  );
+});
+
+bot.action("continue_rent", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ensureUser(ctx);
   states.set(ctx.from.id, { step: "title", termsAccepted: true });
   await ctx.editMessageText(
-    "✅ Условия приняты.\n\n🎁 Теперь напишите название подарка, который хотите сдать в аренду:"
+    "🎁 Отлично! Теперь напишите название подарка, который хотите сдать в аренду.\n\nНапример: «Весенний мишка» или название вашего NFT."
   );
 });
 
