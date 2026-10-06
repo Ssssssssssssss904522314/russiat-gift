@@ -92,9 +92,10 @@ async function dbQuery(text, params = []) {
 
 async function initDb() {
   if (!pool) return;
+
   await dbQuery(`
     CREATE TABLE IF NOT EXISTS users (
-      telegram_id BIGINT PRIMARY KEY,
+      telegram_id BIGINT,
       username TEXT,
       balance NUMERIC(18,2) NOT NULL DEFAULT 0,
       stars_balance NUMERIC(18,2) NOT NULL DEFAULT 0,
@@ -102,7 +103,6 @@ async function initDb() {
       blocked BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS listings (
       id SERIAL PRIMARY KEY,
       seller_id BIGINT NOT NULL,
@@ -112,7 +112,6 @@ async function initDb() {
       status TEXT NOT NULL DEFAULT 'active',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS rentals (
       id SERIAL PRIMARY KEY,
       listing_id INTEGER NOT NULL,
@@ -122,12 +121,10 @@ async function initDb() {
       status TEXT NOT NULL DEFAULT 'paid',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS bot_media (
       media_key TEXT PRIMARY KEY,
       file_id TEXT NOT NULL
     );
-
     CREATE TABLE IF NOT EXISTS warnings (
       id SERIAL PRIMARY KEY,
       telegram_id BIGINT NOT NULL,
@@ -135,7 +132,6 @@ async function initDb() {
       admin_id BIGINT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS complaints (
       id SERIAL PRIMARY KEY,
       telegram_id BIGINT NOT NULL,
@@ -143,7 +139,6 @@ async function initDb() {
       status TEXT NOT NULL DEFAULT 'open',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS admin_actions (
       id SERIAL PRIMARY KEY,
       telegram_id BIGINT NOT NULL,
@@ -153,7 +148,6 @@ async function initDb() {
       admin_id BIGINT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS withdrawals (
       id SERIAL PRIMARY KEY,
       telegram_id BIGINT NOT NULL,
@@ -163,10 +157,59 @@ async function initDb() {
       status TEXT NOT NULL DEFAULT 'pending',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-  `);  await dbQuery(`ALTER TABLE users ADD COLUMN IF NOT EXISTS stars_balance NUMERIC(18,2) NOT NULL DEFAULT 0`);
-  await dbQuery(`ALTER TABLE users ADD COLUMN IF NOT EXISTS warnings INTEGER NOT NULL DEFAULT 0`);
-  await dbQuery(`ALTER TABLE users ADD COLUMN IF NOT EXISTS blocked BOOLEAN NOT NULL DEFAULT FALSE`);
+  `);
 
+  const migrations = [
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id BIGINT`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS balance NUMERIC(18,2) NOT NULL DEFAULT 0`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS stars_balance NUMERIC(18,2) NOT NULL DEFAULT 0`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS warnings INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS blocked BOOLEAN NOT NULL DEFAULT FALSE`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS users_telegram_id_uq ON users (telegram_id)`,
+    `ALTER TABLE listings ADD COLUMN IF NOT EXISTS seller_id BIGINT`,
+    `ALTER TABLE listings ADD COLUMN IF NOT EXISTS title TEXT`,
+    `ALTER TABLE listings ADD COLUMN IF NOT EXISTS price NUMERIC(18,2) DEFAULT 0`,
+    `ALTER TABLE listings ADD COLUMN IF NOT EXISTS duration_days INTEGER DEFAULT 1`,
+    `ALTER TABLE listings ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'`,
+    `ALTER TABLE listings ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+    `ALTER TABLE rentals ADD COLUMN IF NOT EXISTS listing_id INTEGER`,
+    `ALTER TABLE rentals ADD COLUMN IF NOT EXISTS renter_id BIGINT`,
+    `ALTER TABLE rentals ADD COLUMN IF NOT EXISTS seller_id BIGINT`,
+    `ALTER TABLE rentals ADD COLUMN IF NOT EXISTS amount NUMERIC(18,2) DEFAULT 0`,
+    `ALTER TABLE rentals ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'paid'`,
+    `ALTER TABLE rentals ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+    `ALTER TABLE warnings ADD COLUMN IF NOT EXISTS telegram_id BIGINT`,
+    `ALTER TABLE warnings ADD COLUMN IF NOT EXISTS reason TEXT`,
+    `ALTER TABLE warnings ADD COLUMN IF NOT EXISTS admin_id BIGINT`,
+    `ALTER TABLE warnings ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+    `ALTER TABLE complaints ADD COLUMN IF NOT EXISTS telegram_id BIGINT`,
+    `ALTER TABLE complaints ADD COLUMN IF NOT EXISTS text TEXT`,
+    `ALTER TABLE complaints ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'open'`,
+    `ALTER TABLE complaints ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+    `ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS telegram_id BIGINT`,
+    `ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS action TEXT`,
+    `ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS amount NUMERIC(18,2)`,
+    `ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS details TEXT`,
+    `ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS admin_id BIGINT`,
+    `ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+    `ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS telegram_id BIGINT`,
+    `ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS amount NUMERIC(18,2)`,
+    `ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS method TEXT`,
+    `ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS details TEXT`,
+    `ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending'`,
+    `ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
+  ];
+
+  for (const sql of migrations) {
+    try {
+      await dbQuery(sql);
+    } catch (err) {
+      console.error("DB migration failed:", sql, err);
+      throw err;
+    }
+  }
 }
 
 async function ensureUser(ctx) {
