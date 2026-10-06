@@ -174,7 +174,7 @@ async function initDb() {
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS id BIGINT`,
     `CREATE SEQUENCE IF NOT EXISTS users_id_seq AS BIGINT`,
     `UPDATE users SET id = nextval('users_id_seq') WHERE id IS NULL`,
-    `SELECT setval('users_id_seq', COALESCE((SELECT MAX(id) FROM users), 0) + 1, false)`,
+    `SELECT setval('users_id_seq', COALESCE((SELECT MAX(id) FROM users), 0::bigint) + 1::bigint, false)`,
     `ALTER TABLE users ALTER COLUMN id SET DEFAULT nextval('users_id_seq')`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id BIGINT`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT`,
