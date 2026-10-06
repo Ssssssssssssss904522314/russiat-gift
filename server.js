@@ -20,12 +20,26 @@ const MEDIA = {
   support: process.env.MEDIA_SUPPORT || ""
 };
 
-async function sendVisual(ctx, key, text, extra = {}) {
-  const media = MEDIA[key];
-  if (media) {
-    return ctx.replyWithPhoto(media, { caption: text, ...extra });
+async function getMedia(key) {
+  if (MEDIA[key]) return MEDIA[key];
+  if (pool) {
+    const r = await dbQuery("SELECT file_id FROM bot_media WHERE media_key=$1",[key]);
+    return r.rows[0]?.file_id || "";
   }
+  return "";
+}
+
+async function sendVisual(ctx, key, text, extra = {}) {
+  const media = await getMedia(key);
+  if (media) return ctx.replyWithPhoto(media, { caption: text, ...extra });
   return ctx.reply(text, extra);
+}
+
+async function saveMedia(key, fileId) {
+  if (pool) {
+    await dbQuery("INSERT INTO bot_media (media_key,file_id) VALUES ($1,$2) ON CONFLICT (media_key) DO UPDATE SET file_id=EXCLUDED.file_id",[key,fileId]);
+    return;
+  }
 }
 
 async function editVisual(ctx, key, text, extra = {}) {
@@ -107,6 +121,11 @@ async function initDb() {
       amount NUMERIC(18,2) NOT NULL,
       status TEXT NOT NULL DEFAULT 'paid',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS bot_media (
+      media_key TEXT PRIMARY KEY,
+      file_id TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS warnings (
@@ -614,6 +633,19 @@ bot.on("text", async (ctx, next) => {
     return;
   }
 
+  if (state.step === "media_photo") {
+    if (!ctx.message.photo || !ctx.message.photo.length) {
+      await ctx.reply("❌ Отправьте именно фотографию.");
+      return;
+    }
+    const photo=ctx.message.photo[ctx.message.photo.length-1];
+    await saveMedia(state.mediaKey,photo.file_id);
+    const key=state.mediaKey;
+    states.delete(ctx.from.id);
+    await ctx.reply(`✅ Картинка для «${key}» сохранена.`);
+    return;
+  }
+
   if (state.step === "admin_password") {
     if (!adminOnly(ctx)) { states.delete(ctx.from.id); return; }
     if (!ADMIN_PANEL_PASSWORD || text !== ADMIN_PANEL_PASSWORD) {
@@ -791,7 +823,7 @@ function adminOnly(ctx) {
   return ADMIN_TELEGRAM_ID && String(ctx.from.id)===String(ADMIN_TELEGRAM_ID);
 }
 
-bot.action(/^admin:(withdrawals|return|complaints|stars|block|warn|profile)$/, async (ctx) => {
+bot.action(/^admin:(withdrawals|return|complaints|stars|block|warn|profile|media)$/, async (ctx) => {
   await ctx.answerCbQuery();
   if(!adminOnly(ctx)) return ctx.reply("⛔ Нет доступа.");
   const action=ctx.match[1];
@@ -799,6 +831,17 @@ bot.action(/^admin:(withdrawals|return|complaints|stars|block|warn|profile)$/, a
     const list=await getPendingWithdrawals();
     if(!list.length) return ctx.reply("💸 Заявок на вывод нет.");
     for(const w of list) await ctx.reply(`💸 Заявка №${w.id}\\n👤 ID: ${w.telegram_id}\\n💰 ${Number(w.amount).toFixed(2)} ₽\\n💳 ${w.method}\\n📋 ${w.details}`,{reply_markup:{inline_keyboard:[[{text:"✅ Одобрить",callback_data:`wd:approve:${w.id}`},{text:"❌ Отклонить",callback_data:`wd:reject:${w.id}`}]]}});
+    return;
+  }
+  if(action==="media"){
+    await ctx.reply("🖼 Выберите тип картинки:",{reply_markup:{inline_keyboard:[
+      [{text:"Главное меню",callback_data:"media:welcome"},{text:"Профиль",callback_data:"media:profile"}],
+      [{text:"Аренда",callback_data:"media:rental"},{text:"Условия",callback_data:"media:terms"}],
+      [{text:"Жалобы",callback_data:"media:complaint"},{text:"Админка",callback_data:"media:admin"}],
+      [{text:"Предупреждение",callback_data:"media:warning"},{text:"Блокировка",callback_data:"media:blocked"}],
+      [{text:"Stars",callback_data:"media:stars"},{text:"Возврат NFT",callback_data:"media:returnNft"}],
+      [{text:"Вывод",callback_data:"media:withdrawal"},{text:"Поддержка",callback_data:"media:support"}]
+    ]}});
     return;
   }
   const prompts={
@@ -816,6 +859,16 @@ bot.action(/^admin:(withdrawals|return|complaints|stars|block|warn|profile)$/, a
   }
   states.set(ctx.from.id,{step:"admin_"+action});
   await ctx.reply(prompts[action]);
+});
+
+bot.action(/^media:([A-Za-z]+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  if(!adminOnly(ctx)) return ctx.reply("⛔ Нет доступа.");
+  const key=ctx.match[1];
+  const allowed=["welcome","profile","rental","terms","complaint","admin","warning","blocked","stars","returnNft","withdrawal","support"];
+  if(!allowed.includes(key)) return ctx.reply("❌ Неизвестный тип картинки.");
+  states.set(ctx.from.id,{step:"media_photo",mediaKey:key});
+  await ctx.reply(`🖼 Отправьте фотографию для раздела «${key}». Следующее фото будет сохранено и использовано ботом.`);
 });
 
 bot.action(/^complaint:close:(\d+)$/,async ctx=>{
