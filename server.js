@@ -328,17 +328,33 @@ async function subtractBalance(id, amount) {
   return true;
 }
 
-async function createListing(sellerId, title, price, durationDays) {
+async function createListing(sellerId, title, price, durationDays, status = "active") {
   if (pool) {
     const r = await dbQuery(
-      "INSERT INTO listings (seller_id, title, price, duration_days) VALUES ($1,$2,$3,$4) RETURNING id",
-      [sellerId, title, price, durationDays]
+      "INSERT INTO listings (seller_id, title, price, duration_days, status) VALUES ($1,$2,$3,$4,$5) RETURNING id",
+      [sellerId, title, price, durationDays, status]
     );
     return r.rows[0].id;
   }
   const id = memory.nextListingId++;
-  memory.listings.set(id, { id, seller_id: sellerId, title, price, duration_days: durationDays, status: "active" });
+  memory.listings.set(id, { id, seller_id: sellerId, title, price, duration_days: durationDays, status });
   return id;
+}
+
+async function activateListing(id, price, durationDays) {
+  if (pool) {
+    const r = await dbQuery(
+      "UPDATE listings SET price=$2, duration_days=$3, status='active' WHERE id=$1 AND status='pending' RETURNING id",
+      [id, price, durationDays]
+    );
+    return r.rowCount === 1;
+  }
+  const item = memory.listings.get(id);
+  if (!item || item.status !== "pending") return false;
+  item.price = Number(price);
+  item.duration_days = Number(durationDays);
+  item.status = "active";
+  return true;
 }
 
 async function getListings() {
