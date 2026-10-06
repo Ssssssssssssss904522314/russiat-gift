@@ -212,6 +212,38 @@ async function createWithdrawal(id, amount, method, details) {
   return wid;
 }
 
+async function getPendingWithdrawals() {
+  if (pool) {
+    const r = await dbQuery(
+      "SELECT id, telegram_id, amount, method, details, created_at FROM withdrawals WHERE status='pending' ORDER BY id ASC LIMIT 50"
+    );
+    return r.rows;
+  }
+  return [...memory.withdrawals.values()].filter(x => x.status === "pending").slice(0, 50);
+}
+
+async function getWithdrawal(id) {
+  if (pool) {
+    const r = await dbQuery("SELECT * FROM withdrawals WHERE id=$1", [id]);
+    return r.rows[0];
+  }
+  return memory.withdrawals.get(id);
+}
+
+async function updateWithdrawalStatus(id, status) {
+  if (pool) {
+    const r = await dbQuery(
+      "UPDATE withdrawals SET status=$2 WHERE id=$1 AND status='pending' RETURNING telegram_id, amount",
+      [id, status]
+    );
+    return r.rows[0] || null;
+  }
+  const w = memory.withdrawals.get(id);
+  if (!w || w.status !== "pending") return null;
+  w.status = status;
+  return w;
+}
+
 function mainKeyboard() {
   return {
     reply_markup: {
@@ -450,6 +482,78 @@ bot.action("withdraw", async (ctx) => {
   await ctx.editMessageText(
     `💸 Вывод средств\n\nДоступно: ${balance.toFixed(2)} ₽\n\nВведите сумму вывода:`
   );
+});
+
+bot.command("withdrawals", async (ctx) => {
+  if (!ADMIN_TELEGRAM_ID || String(ctx.from.id) !== String(ADMIN_TELEGRAM_ID)) return;
+  const list = await getPendingWithdrawals();
+
+  if (!list.length) {
+    await ctx.reply("💸 Заявок на вывод нет.");
+    return;
+  }
+
+  for (const w of list) {
+    await ctx.reply(
+      `💸 Заявка №${w.id}\n\n👤 ID: ${w.telegram_id}\n💰 Сумма: ${Number(w.amount).toFixed(2)} ₽\n💳 Способ: ${w.method}\n📋 Реквизиты: ${w.details}`,
+      {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "✅ Одобрить", callback_data: `wd:approve:${w.id}` },
+            { text: "❌ Отклонить", callback_data: `wd:reject:${w.id}` }
+          ]]
+        }
+      }
+    );
+  }
+});
+
+bot.action(/^wd:(approve|reject):(\\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!ADMIN_TELEGRAM_ID || String(ctx.from.id) !== String(ADMIN_TELEGRAM_ID)) {
+    await ctx.reply("⛔ Нет доступа.");
+    return;
+  }
+
+  const action = ctx.match[1];
+  const id = Number(ctx.match[2]);
+  const w = await getWithdrawal(id);
+
+  if (!w || w.status !== "pending") {
+    await ctx.editMessageText("ℹ️ Эта заявка уже обработана.");
+    return;
+  }
+
+  if (action === "approve") {
+    await updateWithdrawalStatus(id, "approved");
+    await ctx.editMessageText(`✅ Заявка №${id} одобрена. Сумма: ${Number(w.amount).toFixed(2)} ₽`);
+    try {
+      await bot.telegram.sendMessage(
+        String(w.telegram_id),
+        `✅ Ваша заявка на вывод №${id} одобрена. Сумма: ${Number(w.amount).toFixed(2)} ₽. Выплата производится администратором.`
+      );
+    } catch (e) {
+      console.error("withdrawal notification error:", e);
+    }
+    return;
+  }
+
+  const changed = await updateWithdrawalStatus(id, "rejected");
+  if (!changed) {
+    await ctx.editMessageText("ℹ️ Эта заявка уже обработана.");
+    return;
+  }
+
+  await addBalance(w.telegram_id, Number(w.amount));
+  await ctx.editMessageText(`❌ Заявка №${id} отклонена. Сумма возвращена пользователю.`);
+  try {
+    await bot.telegram.sendMessage(
+      String(w.telegram_id),
+      `❌ Заявка на вывод №${id} отклонена. ${Number(w.amount).toFixed(2)} ₽ возвращены на ваш баланс.`
+    );
+  } catch (e) {
+    console.error("withdrawal notification error:", e);
+  }
 });
 
 bot.action("home", async (ctx) => {
