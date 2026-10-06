@@ -4,6 +4,7 @@ const { Pool } = require("pg");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_TELEGRAM_ID = process.env.ADMIN_TELEGRAM_ID || "";
+const ADMIN_PANEL_PASSWORD = process.env.ADMIN_PANEL_PASSWORD || "";
 
 if (!BOT_TOKEN) {
   console.error("BOT_TOKEN is not configured");
@@ -474,6 +475,35 @@ bot.on("text", async (ctx, next) => {
 
   const text = ctx.message.text.trim();
 
+  if (state.step === "admin_password") {
+    if (!ADMIN_TELEGRAM_ID || String(ctx.from.id) !== String(ADMIN_TELEGRAM_ID)) {
+      states.delete(ctx.from.id);
+      return;
+    }
+    if (!ADMIN_PANEL_PASSWORD || text !== ADMIN_PANEL_PASSWORD) {
+      states.delete(ctx.from.id);
+      await ctx.reply("❌ Неверный пароль. Доступ к админ-панели закрыт.");
+      return;
+    }
+    states.delete(ctx.from.id);
+    const list = await getPendingWithdrawals();
+    if (!list.length) {
+      await ctx.reply("🔐 Админ-панель открыта.\n\n💸 Заявок на вывод нет.");
+      return;
+    }
+    await ctx.reply(`🔐 Админ-панель открыта.\n\n💸 Ожидающих заявок: ${list.length}`);
+    for (const w of list) {
+      await ctx.reply(
+        `💸 Заявка №${w.id}\\n\\n👤 ID: ${w.telegram_id}\\n💰 Сумма: ${Number(w.amount).toFixed(2)} ₽\\n💳 Способ: ${w.method}\\n📋 Реквизиты: ${w.details}`,
+        { reply_markup: { inline_keyboard: [[
+          { text: "✅ Одобрить", callback_data: `wd:approve:${w.id}` },
+          { text: "❌ Отклонить", callback_data: `wd:reject:${w.id}` }
+        ]] } }
+      );
+    }
+    return;
+  }
+
   if (state.step === "title") {
     state.title = text.slice(0, 100);
     state.step = "price";
@@ -582,28 +612,9 @@ bot.action("withdraw", async (ctx) => {
 
 bot.command("withdrawals", async (ctx) => {
   if (!ADMIN_TELEGRAM_ID || String(ctx.from.id) !== String(ADMIN_TELEGRAM_ID)) return;
-  const list = await getPendingWithdrawals();
-
-  if (!list.length) {
-    await ctx.reply("💸 Заявок на вывод нет.");
-    return;
-  }
-
-  for (const w of list) {
-    await ctx.reply(
-      `💸 Заявка №${w.id}\n\n👤 ID: ${w.telegram_id}\n💰 Сумма: ${Number(w.amount).toFixed(2)} ₽\n💳 Способ: ${w.method}\n📋 Реквизиты: ${w.details}`,
-      {
-        reply_markup: {
-          inline_keyboard: [[
-            { text: "✅ Одобрить", callback_data: `wd:approve:${w.id}` },
-            { text: "❌ Отклонить", callback_data: `wd:reject:${w.id}` }
-          ]]
-        }
-      }
-    );
-  }
+  states.set(ctx.from.id, { step: "admin_password" });
+  await ctx.reply("🔐 Введите пароль для доступа к админ-панели:");
 });
-
 bot.action(/^wd:(approve|reject):(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   if (!ADMIN_TELEGRAM_ID || String(ctx.from.id) !== String(ADMIN_TELEGRAM_ID)) {
