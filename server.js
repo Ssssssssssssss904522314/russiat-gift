@@ -23,7 +23,6 @@ const pool = process.env.DATABASE_URL
     })
   : null;
 
-// Fallback for local testing when PostgreSQL is not configured.
 const memory = {
   users: new Map(),
   listings: new Map(),
@@ -244,12 +243,52 @@ async function updateWithdrawalStatus(id, status) {
   return w;
 }
 
+function termsKeyboard() {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "✅ Я ознакомился с условиями", callback_data: "accept_terms" }],
+        [{ text: "◀️ Назад", callback_data: "home" }]
+      ]
+    }
+  };
+}
+
+function termsText() {
+  return `📜 Условия сдачи NFT / подарков
+
+Перед размещением подарка в аренду обязательно ознакомьтесь с правилами.
+
+1. 🎁 Подарок должен принадлежать вам. Запрещено размещать чужие подарки без разрешения владельца.
+
+2. 💰 Указывайте реальную и понятную цену аренды и срок аренды.
+
+3. 📅 После начала аренды нельзя самовольно отзывать или передавать подарок другому пользователю до окончания оплаченного срока.
+
+4. 🤝 Запрещены обман, мошенничество, фиктивные объявления и попытки получить оплату без предоставления аренды.
+
+5. 🚫 За нарушение правил объявление может быть удалено, а аккаунт — ограничен или заблокирован.
+
+6. 🛡️ Спорные ситуации рассматриваются администрацией сервиса. Решение принимается по данным об оплате и аренде.
+
+7. 💸 Выплата продавцу производится на внутренний баланс бота после успешной оплаты аренды.
+
+8. 🧾 При выводе средств пользователь обязан указывать корректные реквизиты. Ответственность за ошибочные реквизиты несёт пользователь.
+
+9. ⚠️ Администрация может запросить дополнительную проверку по спорной операции.
+
+10. 🔐 Никому не передавайте пароль, коды входа, коды Telegram или другие секретные данные.
+
+Нажимая «Я ознакомился с условиями», вы подтверждаете, что прочитали и принимаете эти правила.`;
+}
+
 function mainKeyboard() {
   return {
     reply_markup: {
       inline_keyboard: [
         [{ text: "🎁 Арендовать подарок", callback_data: "catalog" }],
         [{ text: "🎁 Сдать в аренду", callback_data: "rent_out" }],
+        [{ text: "📜 Условия сдачи NFT", callback_data: "terms" }],
         [{ text: "📦 Мои аренды", callback_data: "rentals" }],
         [{ text: "💰 Мой баланс", callback_data: "balance" }],
         [{ text: "💸 Вывести средства", callback_data: "withdraw" }],
@@ -265,6 +304,20 @@ bot.start(async (ctx) => {
   await ctx.reply(
     "🎁 Добро пожаловать в аренду уникальных Telegram-подарков!\n\nВыберите действие:",
     mainKeyboard()
+  );
+});
+
+bot.action("terms", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(termsText(), termsKeyboard());
+});
+
+bot.action("accept_terms", async (ctx) => {
+  await ctx.answerCbQuery("Условия приняты");
+  await ensureUser(ctx);
+  states.set(ctx.from.id, { step: "title", termsAccepted: true });
+  await ctx.editMessageText(
+    "✅ Условия приняты.\n\n🎁 Теперь напишите название подарка, который хотите сдать в аренду:"
   );
 });
 
@@ -366,9 +419,9 @@ bot.on("successful_payment", async (ctx) => {
 bot.action("rent_out", async (ctx) => {
   await ctx.answerCbQuery();
   await ensureUser(ctx);
-  states.set(ctx.from.id, { step: "title" });
   await ctx.editMessageText(
-    "🎁 Сдать подарок в аренду\n\nНапишите название подарка:"
+    termsText(),
+    termsKeyboard()
   );
 });
 
@@ -508,7 +561,7 @@ bot.command("withdrawals", async (ctx) => {
   }
 });
 
-bot.action(/^wd:(approve|reject):(\\d+)$/, async (ctx) => {
+bot.action(/^wd:(approve|reject):(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   if (!ADMIN_TELEGRAM_ID || String(ctx.from.id) !== String(ADMIN_TELEGRAM_ID)) {
     await ctx.reply("⛔ Нет доступа.");
