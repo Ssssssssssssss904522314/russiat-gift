@@ -5,6 +5,37 @@ const { Pool } = require("pg");
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_TELEGRAM_ID = process.env.ADMIN_TELEGRAM_ID || "";
 const ADMIN_PANEL_PASSWORD = process.env.ADMIN_PANEL_PASSWORD || "";
+const MEDIA = {
+  welcome: process.env.MEDIA_WELCOME || "",
+  profile: process.env.MEDIA_PROFILE || "",
+  rental: process.env.MEDIA_RENTAL || "",
+  terms: process.env.MEDIA_TERMS || "",
+  complaint: process.env.MEDIA_COMPLAINT || "",
+  admin: process.env.MEDIA_ADMIN || "",
+  warning: process.env.MEDIA_WARNING || "",
+  blocked: process.env.MEDIA_BLOCKED || "",
+  stars: process.env.MEDIA_STARS || "",
+  returnNft: process.env.MEDIA_RETURN_NFT || "",
+  withdrawal: process.env.MEDIA_WITHDRAWAL || "",
+  support: process.env.MEDIA_SUPPORT || ""
+};
+
+async function sendVisual(ctx, key, text, extra = {}) {
+  const media = MEDIA[key];
+  if (media) {
+    return ctx.replyWithPhoto(media, { caption: text, ...extra });
+  }
+  return ctx.reply(text, extra);
+}
+
+async function editVisual(ctx, key, text, extra = {}) {
+  // Telegram cannot attach a new photo to an existing text message with editMessageText.
+  // Send a new visual message and remove the old one when possible.
+  try { await ctx.deleteMessage(); } catch (e) {}
+  return sendVisual(ctx, key, text, extra);
+}
+
+
 
 if (!BOT_TOKEN) {
   console.error("BOT_TOKEN is not configured");
@@ -427,15 +458,12 @@ function mainKeyboard() {
 
 bot.start(async (ctx) => {
   await ensureUser(ctx);
-  await ctx.reply(
-    "🎁 Добро пожаловать в аренду уникальных Telegram-подарков!\n\nВыберите действие:",
-    mainKeyboard()
-  );
+  await sendVisual(ctx, "welcome", "🎁 Добро пожаловать в аренду уникальных Telegram-подарков!\n\nВыберите действие:", mainKeyboard());
 });
 
 bot.action("terms", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.editMessageText(termsText(), termsKeyboard());
+  await editVisual(ctx, "terms", termsText(), termsKeyboard());
 });
 
 bot.action("accept_terms", async (ctx) => {
@@ -466,7 +494,7 @@ bot.action("profile", async (ctx) => {
 
 bot.action("complaint", async (ctx) => {
   await ctx.answerCbQuery(); await ensureUser(ctx); states.set(ctx.from.id,{step:"complaint"});
-  await ctx.editMessageText("🚨 Напишите текст жалобы. Укажите, на кого или на какую аренду она относится:");
+  await editVisual(ctx, "complaint", "🚨 Напишите текст жалобы. Укажите, на кого или на какую аренду она относится:");
 });
 
 bot.action("balance", async (ctx) => {
@@ -611,25 +639,25 @@ bot.on("text", async (ctx, next) => {
   }
   if (state.step === "admin_block") {
     const n=Number(text); if(!Number.isInteger(n)){await ctx.reply("❌ Неверный Telegram ID.");return;}
-    await setBlocked(n,true); states.delete(ctx.from.id); await ctx.reply(`🔒 Пользователь ${n} заблокирован.`); try{await bot.telegram.sendMessage(String(n),"🔒 Ваш аккаунт заблокирован администрацией.");}catch(e){} return;
+    await setBlocked(n,true); states.delete(ctx.from.id); await sendVisual(ctx, "blocked", `🔒 Пользователь ${n} заблокирован.`); try{await bot.telegram.sendMessage(String(n),"🔒 Ваш аккаунт заблокирован администрацией.");}catch(e){} return;
   }
   if (state.step === "admin_warn") {
     const [uid,...rest]=text.split("|"); const n=Number(uid.trim()), reason=rest.join("|").trim();
     if(!Number.isInteger(n)||!reason){await ctx.reply("❌ Формат: ID | причина");return;}
-    await addWarning(n,reason,ctx.from.id); states.delete(ctx.from.id); await ctx.reply(`⚠️ Предупреждение выдано пользователю ${n}.`); try{await bot.telegram.sendMessage(String(n),`⚠️ Вам выдано предупреждение.\\nПричина: ${reason}`);}catch(e){} return;
+    await addWarning(n,reason,ctx.from.id); states.delete(ctx.from.id); await sendVisual(ctx, "warning", `⚠️ Предупреждение выдано пользователю ${n}.`); try{await bot.telegram.sendMessage(String(n),`⚠️ Вам выдано предупреждение.\\nПричина: ${reason}`);}catch(e){} return;
   }
   if (state.step === "admin_profile") {
     const n=Number(text); if(!Number.isInteger(n)){await ctx.reply("❌ Неверный Telegram ID.");return;}
     const p=await getProfile(n); const u=p.user; states.delete(ctx.from.id);
     if(!u) return ctx.reply("❌ Пользователь не найден.");
-    await ctx.reply(`👤 Профиль ${n}\\n💰 Баланс: ${Number(u.balance||0).toFixed(2)} ₽\\n⭐ Stars: ${Number(u.stars_balance||0)}\\n⚠️ Предупреждений: ${Number(u.warnings||0)}\\n🔒 ${u.blocked?"Заблокирован":"Активен"}`);
+    await sendVisual(ctx, "profile", `👤 Профиль ${n}\\n💰 Баланс: ${Number(u.balance||0).toFixed(2)} ₽\\n⭐ Stars: ${Number(u.stars_balance||0)}\\n⚠️ Предупреждений: ${Number(u.warnings||0)}\\n🔒 ${u.blocked?"Заблокирован":"Активен"}`);
     return;
   }
   if (state.step === "admin_return") {
     const n=Number(text); if(!Number.isInteger(n)){await ctx.reply("❌ Введите номер аренды.");return;}
     const r=await markRentalReturned(n); states.delete(ctx.from.id);
     if(!r) return ctx.reply("❌ Аренда не найдена или уже возвращена.");
-    await ctx.reply(`🔄 Возврат по аренде №${n} оформлен.\\n\\n⚠️ Передача NFT обратно владельцу должна быть выполнена через поддерживаемый Telegram-механизм передачи подарка.`);
+    await sendVisual(ctx, "returnNft", `🔄 Возврат по аренде №${n} оформлен.\\n\\n⚠️ Передача NFT обратно владельцу должна быть выполнена через поддерживаемый Telegram-механизм передачи подарка.`);
     try{await bot.telegram.sendMessage(String(r.renter_id),`🔄 По аренде №${n} оформлен возврат NFT. Ожидайте дальнейших действий поддержки.`);}catch(e){}
     return;
   }
@@ -734,8 +762,7 @@ bot.action("withdraw", async (ctx) => {
   }
 
   states.set(ctx.from.id, { step: "withdraw_amount" });
-  await ctx.editMessageText(
-    `💸 Вывод средств\n\nДоступно: ${balance.toFixed(2)} ₽\n\nВведите сумму вывода:`
+  await editVisual(ctx, "withdrawal", `💸 Вывод средств\n\nДоступно: ${balance.toFixed(2)} ₽\n\nВведите сумму вывода:`
   );
 });
 
@@ -864,7 +891,7 @@ bot.action("stars", async (ctx) => {
 
 bot.action("support", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.editMessageText("💬 Поддержка: напишите сюда свой вопрос.");
+  await editVisual(ctx, "support", "💬 Поддержка: напишите сюда свой вопрос.");
 });
 
 app.get("/", (_req, res) => {
