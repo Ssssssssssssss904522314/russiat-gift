@@ -189,7 +189,11 @@ async function initDb() {
          EXECUTE 'ALTER TABLE users ALTER COLUMN id SET DEFAULT nextval(''users_id_seq'')::text';
        END IF;
     END $m$`,
-    `SELECT setval('users_id_seq', GREATEST(COALESCE((SELECT MAX(id)::bigint FROM users WHERE id::text ~ '^[0-9]+$'), 0::bigint), 1::bigint), true)`,
+    `DO $m$ DECLARE max_id BIGINT; BEGIN
+       SELECT COALESCE(MAX(id), 0)::bigint INTO max_id FROM users;
+       IF max_id < 1 THEN max_id := 1; END IF;
+       PERFORM setval(''users_id_seq'', max_id, true);
+    END $m$`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id BIGINT`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS balance NUMERIC(18,2) NOT NULL DEFAULT 0`,
