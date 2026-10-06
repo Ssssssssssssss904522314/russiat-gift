@@ -1,7 +1,9 @@
 const express = require("express");
 const { Telegraf } = require("telegraf");
+const { Pool } = require("pg");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const ADMIN_TELEGRAM_ID = process.env.ADMIN_TELEGRAM_ID || "";
 
 if (!BOT_TOKEN) {
   console.error("BOT_TOKEN is not configured");
@@ -12,16 +14,239 @@ const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 app.use(express.json());
 
+const pool = process.env.DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_URL.includes("localhost")
+        ? false
+        : { rejectUnauthorized: false }
+    })
+  : null;
+
+// Fallback for local testing when PostgreSQL is not configured.
+const memory = {
+  users: new Map(),
+  listings: new Map(),
+  rentals: new Map(),
+  withdrawals: new Map(),
+  nextListingId: 1,
+  nextRentalId: 1,
+  nextWithdrawalId: 1
+};
+
+const states = new Map();
+
+async function dbQuery(text, params = []) {
+  if (!pool) return null;
+  return pool.query(text, params);
+}
+
+async function initDb() {
+  if (!pool) return;
+  await dbQuery(`
+    CREATE TABLE IF NOT EXISTS users (
+      telegram_id BIGINT PRIMARY KEY,
+      username TEXT,
+      balance NUMERIC(18,2) NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS listings (
+      id SERIAL PRIMARY KEY,
+      seller_id BIGINT NOT NULL,
+      title TEXT NOT NULL,
+      price NUMERIC(18,2) NOT NULL,
+      duration_days INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS rentals (
+      id SERIAL PRIMARY KEY,
+      listing_id INTEGER NOT NULL,
+      renter_id BIGINT NOT NULL,
+      seller_id BIGINT NOT NULL,
+      amount NUMERIC(18,2) NOT NULL,
+      status TEXT NOT NULL DEFAULT 'paid',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS withdrawals (
+      id SERIAL PRIMARY KEY,
+      telegram_id BIGINT NOT NULL,
+      amount NUMERIC(18,2) NOT NULL,
+      method TEXT NOT NULL,
+      details TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+}
+
+async function ensureUser(ctx) {
+  const id = ctx.from.id;
+  const username = ctx.from.username || "";
+
+  if (pool) {
+    await dbQuery(
+      `INSERT INTO users (telegram_id, username)
+       VALUES ($1, $2)
+       ON CONFLICT (telegram_id)
+       DO UPDATE SET username = EXCLUDED.username`,
+      [id, username]
+    );
+    return;
+  }
+
+  if (!memory.users.has(id)) {
+    memory.users.set(id, { telegram_id: id, username, balance: 0 });
+  } else {
+    memory.users.get(id).username = username;
+  }
+}
+
+async function getBalance(id) {
+  if (pool) {
+    const r = await dbQuery("SELECT balance FROM users WHERE telegram_id = $1", [id]);
+    return Number(r.rows[0]?.balance || 0);
+  }
+  return Number(memory.users.get(id)?.balance || 0);
+}
+
+async function addBalance(id, amount) {
+  if (pool) {
+    await dbQuery(
+      "INSERT INTO users (telegram_id, balance) VALUES ($1, $2) ON CONFLICT (telegram_id) DO UPDATE SET balance = users.balance + $2",
+      [id, amount]
+    );
+    return;
+  }
+  if (!memory.users.has(id)) memory.users.set(id, { telegram_id: id, username: "", balance: 0 });
+  memory.users.get(id).balance += Number(amount);
+}
+
+async function subtractBalance(id, amount) {
+  if (pool) {
+    const r = await dbQuery(
+      "UPDATE users SET balance = balance - $2 WHERE telegram_id = $1 AND balance >= $2 RETURNING balance",
+      [id, amount]
+    );
+    return r.rowCount === 1;
+  }
+  const user = memory.users.get(id);
+  if (!user || user.balance < amount) return false;
+  user.balance -= Number(amount);
+  return true;
+}
+
+async function createListing(sellerId, title, price, durationDays) {
+  if (pool) {
+    const r = await dbQuery(
+      "INSERT INTO listings (seller_id, title, price, duration_days) VALUES ($1,$2,$3,$4) RETURNING id",
+      [sellerId, title, price, durationDays]
+    );
+    return r.rows[0].id;
+  }
+  const id = memory.nextListingId++;
+  memory.listings.set(id, { id, seller_id: sellerId, title, price, duration_days: durationDays, status: "active" });
+  return id;
+}
+
+async function getListings() {
+  if (pool) {
+    const r = await dbQuery(
+      "SELECT id, seller_id, title, price, duration_days FROM listings WHERE status='active' ORDER BY id DESC LIMIT 20"
+    );
+    return r.rows;
+  }
+  return [...memory.listings.values()].filter(x => x.status === "active").slice(-20).reverse();
+}
+
+async function getListing(id) {
+  if (pool) {
+    const r = await dbQuery("SELECT * FROM listings WHERE id=$1 AND status='active'", [id]);
+    return r.rows[0];
+  }
+  return memory.listings.get(id);
+}
+
+async function createRental(listing) {
+  if (pool) {
+    const r = await dbQuery(
+      "INSERT INTO rentals (listing_id, renter_id, seller_id, amount) VALUES ($1,$2,$3,$4) RETURNING id",
+      [listing.id, currentPayment.renterId, listing.seller_id, listing.price]
+    );
+    return r.rows[0].id;
+  }
+  const id = memory.nextRentalId++;
+  memory.rentals.set(id, {
+    id,
+    listing_id: listing.id,
+    renter_id: currentPayment.renterId,
+    seller_id: listing.seller_id,
+    amount: Number(listing.price),
+    status: "paid"
+  });
+  return id;
+}
+
+let currentPayment = { renterId: 0 };
+
+async function recordRentalAndCredit(listing, renterId) {
+  currentPayment.renterId = renterId;
+  const rentalId = await createRental(listing);
+  await addBalance(listing.seller_id, Number(listing.price));
+  return rentalId;
+}
+
+async function createWithdrawal(id, amount, method, details) {
+  if (pool) {
+    const r = await dbQuery(
+      "INSERT INTO withdrawals (telegram_id, amount, method, details) VALUES ($1,$2,$3,$4) RETURNING id",
+      [id, amount, method, details]
+    );
+    return r.rows[0].id;
+  }
+  const wid = memory.nextWithdrawalId++;
+  memory.withdrawals.set(wid, { id: wid, telegram_id: id, amount, method, details, status: "pending" });
+  return wid;
+}
+
+function mainKeyboard() {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🎁 Арендовать подарок", callback_data: "catalog" }],
+        [{ text: "🎁 Сдать в аренду", callback_data: "rent_out" }],
+        [{ text: "📦 Мои аренды", callback_data: "rentals" }],
+        [{ text: "💰 Мой баланс", callback_data: "balance" }],
+        [{ text: "💸 Вывести средства", callback_data: "withdraw" }],
+        [{ text: "⭐ Пополнить Stars", callback_data: "stars" }],
+        [{ text: "💬 Поддержка", callback_data: "support" }]
+      ]
+    }
+  };
+}
+
 bot.start(async (ctx) => {
+  await ensureUser(ctx);
   await ctx.reply(
     "🎁 Добро пожаловать в аренду уникальных Telegram-подарков!\n\nВыберите действие:",
+    mainKeyboard()
+  );
+});
+
+bot.action("balance", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ensureUser(ctx);
+  const balance = await getBalance(ctx.from.id);
+  await ctx.editMessageText(
+    `💰 Ваш баланс\n\nДоступно: ${balance.toFixed(2)} RUB\n\nЭтот баланс пополняется после успешной аренды ваших подарков.`,
     {
       reply_markup: {
         inline_keyboard: [
-          [{ text: "🎁 Арендовать подарок", callback_data: "catalog" }],
-          [{ text: "📦 Мои аренды", callback_data: "rentals" }],
-          [{ text: "⭐ Пополнить Stars", callback_data: "stars" }],
-          [{ text: "💬 Поддержка", callback_data: "support" }]
+          [{ text: "💸 Вывести средства", callback_data: "withdraw" }],
+          [{ text: "◀️ Назад", callback_data: "home" }]
         ]
       }
     }
@@ -30,19 +255,217 @@ bot.start(async (ctx) => {
 
 bot.action("catalog", async (ctx) => {
   await ctx.answerCbQuery();
+  await ensureUser(ctx);
+  const listings = await getListings();
+
+  if (!listings.length) {
+    await ctx.editMessageText(
+      "🎁 Сейчас нет доступных подарков для аренды.\n\nВладелец подарка может нажать «🎁 Сдать в аренду».",
+      { reply_markup: { inline_keyboard: [[{ text: "◀️ Назад", callback_data: "home" }]] } }
+    );
+    return;
+  }
+
+  const rows = listings.map(item => [{
+    text: `🎁 ${item.title} — ${Number(item.price).toFixed(2)} ₽ / ${item.duration_days} д.`,
+    callback_data: `rent:${item.id}`
+  }]);
+
+  rows.push([{ text: "◀️ Назад", callback_data: "home" }]);
+  await ctx.editMessageText("🎁 Доступные подарки:", { reply_markup: { inline_keyboard: rows } });
+});
+
+bot.action(/^rent:(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  await ensureUser(ctx);
+  const listing = await getListing(Number(ctx.match[1]));
+
+  if (!listing) {
+    await ctx.editMessageText("❌ Это объявление больше недоступно.");
+    return;
+  }
+
+  await ctx.replyWithInvoice({
+    title: `Аренда: ${listing.title}`,
+    description: `Аренда уникального подарка на ${listing.duration_days} д.`,
+    payload: JSON.stringify({ type: "rental", listingId: listing.id, renterId: ctx.from.id }),
+    currency: "XTR",
+    prices: [{ label: `Аренда ${listing.title}`, amount: Math.max(1, Math.round(Number(listing.price))) }]
+  });
+});
+
+bot.on("pre_checkout_query", async (ctx) => {
+  const payload = JSON.parse(ctx.update.pre_checkout_query.invoice_payload || "{}");
+  if (payload.type !== "rental") {
+    await ctx.answerPreCheckoutQuery(false, "Неизвестный платёж.");
+    return;
+  }
+  const listing = await getListing(Number(payload.listingId));
+  if (!listing) {
+    await ctx.answerPreCheckoutQuery(false, "Подарок уже недоступен.");
+    return;
+  }
+  await ctx.answerPreCheckoutQuery(true);
+});
+
+bot.on("successful_payment", async (ctx) => {
+  try {
+    const payment = ctx.message.successful_payment;
+    const payload = JSON.parse(payment.invoice_payload || "{}");
+    if (payload.type !== "rental") return;
+
+    const listing = await getListing(Number(payload.listingId));
+    if (!listing) {
+      await ctx.reply("⚠️ Платёж получен, но объявление уже недоступно. Обратитесь в поддержку.");
+      return;
+    }
+
+    const rentalId = await recordRentalAndCredit(listing, ctx.from.id);
+    await ctx.reply(
+      `✅ Аренда оплачена!\n\n🎁 ${listing.title}\n📅 Срок: ${listing.duration_days} д.\n💰 Владелец получил ${Number(listing.price).toFixed(2)} ₽ на баланс бота.\n🧾 Аренда №${rentalId}`,
+      mainKeyboard()
+    );
+  } catch (err) {
+    console.error("successful_payment error:", err);
+    await ctx.reply("⚠️ Платёж получен, но обработка аренды завершилась с ошибкой. Обратитесь в поддержку.");
+  }
+});
+
+bot.action("rent_out", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ensureUser(ctx);
+  states.set(ctx.from.id, { step: "title" });
   await ctx.editMessageText(
-    "🎁 Каталог пока пуст.\n\nСледующим шагом добавим реальные уникальные подарки, сроки аренды и цены."
+    "🎁 Сдать подарок в аренду\n\nНапишите название подарка:"
   );
+});
+
+bot.on("text", async (ctx, next) => {
+  const state = states.get(ctx.from.id);
+  if (!state) return next();
+
+  const text = ctx.message.text.trim();
+
+  if (state.step === "title") {
+    state.title = text.slice(0, 100);
+    state.step = "price";
+    await ctx.reply("💰 Напишите цену аренды в рублях за выбранный срок:");
+    return;
+  }
+
+  if (state.step === "price") {
+    const price = Number(text.replace(",", "."));
+    if (!Number.isFinite(price) || price <= 0) {
+      await ctx.reply("❌ Введите корректную цену, например: 150");
+      return;
+    }
+    state.price = price;
+    state.step = "duration";
+    await ctx.reply("📅 Напишите срок аренды в днях, например: 1, 7 или 30:");
+    return;
+  }
+
+  if (state.step === "duration") {
+    const days = Number(text);
+    if (!Number.isInteger(days) || days <= 0 || days > 365) {
+      await ctx.reply("❌ Введите целое число дней от 1 до 365.");
+      return;
+    }
+
+    const listingId = await createListing(ctx.from.id, state.title, state.price, days);
+    states.delete(ctx.from.id);
+
+    await ctx.reply(
+      `✅ Подарок выставлен в аренду!\n\n🎁 ${state.title}\n💰 Цена: ${state.price.toFixed(2)} ₽\n📅 Срок: ${days} д.\n\nПосле успешной оплаты аренды деньги будут зачислены на ваш баланс бота.`,
+      mainKeyboard()
+    );
+    return;
+  }
+
+  if (state.step === "withdraw_amount") {
+    const amount = Number(text.replace(",", "."));
+    const balance = await getBalance(ctx.from.id);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await ctx.reply("❌ Введите корректную сумму.");
+      return;
+    }
+    if (amount > balance) {
+      await ctx.reply(`❌ Недостаточно средств. Ваш баланс: ${balance.toFixed(2)} ₽`);
+      return;
+    }
+
+    state.amount = amount;
+    state.step = "withdraw_method";
+    await ctx.reply("💳 Напишите способ получения выплаты (например, СБП или банковская карта):");
+    return;
+  }
+
+  if (state.step === "withdraw_method") {
+    state.method = text.slice(0, 50);
+    state.step = "withdraw_details";
+    await ctx.reply("🔐 Напишите реквизиты для выплаты. Не отправляйте сюда пароль или код подтверждения Telegram.");
+    return;
+  }
+
+  if (state.step === "withdraw_details") {
+    const ok = await subtractBalance(ctx.from.id, state.amount);
+    if (!ok) {
+      states.delete(ctx.from.id);
+      await ctx.reply("❌ Не удалось зарезервировать сумму для вывода. Попробуйте ещё раз.");
+      return;
+    }
+
+    const wid = await createWithdrawal(ctx.from.id, state.amount, state.method, text.slice(0, 300));
+    states.delete(ctx.from.id);
+
+    await ctx.reply(
+      `✅ Заявка на вывод №${wid} создана.\n\n💰 Сумма: ${state.amount.toFixed(2)} ₽\n💳 Способ: ${state.method}\n\nПосле проверки заявка будет обработана.`,
+      mainKeyboard()
+    );
+
+    if (ADMIN_TELEGRAM_ID) {
+      await bot.telegram.sendMessage(
+        ADMIN_TELEGRAM_ID,
+        `💸 Новая заявка на вывод №${wid}\n\n👤 Пользователь: ${ctx.from.username ? "@" + ctx.from.username : ctx.from.id}\n🆔 ID: ${ctx.from.id}\n💰 Сумма: ${state.amount.toFixed(2)} ₽\n💳 Способ: ${state.method}\n📋 Реквизиты: ${text.slice(0, 300)}`
+      );
+    }
+  }
+});
+
+bot.action("withdraw", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ensureUser(ctx);
+  const balance = await getBalance(ctx.from.id);
+
+  if (balance <= 0) {
+    await ctx.editMessageText(
+      "💸 Вывод средств\n\nУ вас пока нет доступных средств для вывода.",
+      { reply_markup: { inline_keyboard: [[{ text: "◀️ Назад", callback_data: "home" }]] } }
+    );
+    return;
+  }
+
+  states.set(ctx.from.id, { step: "withdraw_amount" });
+  await ctx.editMessageText(
+    `💸 Вывод средств\n\nДоступно: ${balance.toFixed(2)} ₽\n\nВведите сумму вывода:`
+  );
+});
+
+bot.action("home", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ensureUser(ctx);
+  await ctx.editMessageText("🎁 Главное меню:", mainKeyboard());
 });
 
 bot.action("rentals", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.editMessageText("📦 У вас пока нет активных аренд.");
+  await ctx.editMessageText("📦 Раздел «Мои аренды» будет расширен после подключения полноценного управления сроком аренды.");
 });
 
 bot.action("stars", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.editMessageText("⭐ Пополнение Stars подключим через официальные Telegram Payments.");
+  await ctx.editMessageText("⭐ Пополнение Stars подключается через официальные Telegram Payments.");
 });
 
 bot.action("support", async (ctx) => {
@@ -56,15 +479,22 @@ app.get("/", (_req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`Web server listening on ${PORT}`);
-});
+async function start() {
+  try {
+    await initDb();
+    app.listen(PORT, () => {
+      console.log(`Web server listening on ${PORT}`);
+    });
 
-bot.launch().then(() => {
-  console.log("Telegram bot started");
-}).catch((err) => {
-  console.error("Telegram bot failed to start:", err);
-});
+    await bot.launch();
+    console.log("Telegram bot started");
+  } catch (err) {
+    console.error("Startup failed:", err);
+    process.exit(1);
+  }
+}
+
+start();
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
