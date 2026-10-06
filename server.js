@@ -57,6 +57,16 @@ if (!BOT_TOKEN) {
 }
 
 const bot = new Telegraf(BOT_TOKEN);
+
+bot.catch((err, ctx) => {
+  console.error("Telegram bot error:", err);
+  try {
+    if (ctx && ctx.chat) {
+      ctx.reply("⚠️ Произошла внутренняя ошибка бота. Попробуйте ещё раз.").catch(() => {});
+    }
+  } catch (e) {}
+});
+
 const app = express();
 app.use(express.json());
 
@@ -1125,15 +1135,26 @@ async function start() {
       console.log(`Web server listening on ${PORT}`);
     });
 
-    await bot.launch();
-    console.log("Telegram bot started");
+    // Polling and webhook are mutually exclusive in Telegram.
+    // Remove an old webhook automatically so the bot can receive messages.
+    await bot.telegram.deleteWebhook({ drop_pending_updates: false });
+    console.log("Telegram webhook cleared");
+
+    await bot.launch({
+      dropPendingUpdates: false,
+      allowedUpdates: ["message", "callback_query", "pre_checkout_query"]
+    });
+    console.log("Telegram bot started and polling for updates");
   } catch (err) {
     console.error("Startup failed:", err);
     process.exit(1);
   }
 }
 
-start();
+start().catch((err) => {
+  console.error("Fatal startup error:", err);
+  process.exit(1);
+});
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
