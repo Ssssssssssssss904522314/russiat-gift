@@ -192,7 +192,7 @@ async function initDb() {
     `DO $m$ DECLARE max_id BIGINT; BEGIN
        SELECT COALESCE(MAX(id), 0)::bigint INTO max_id FROM users;
        IF max_id < 1 THEN max_id := 1; END IF;
-       PERFORM setval(''users_id_seq'', max_id, true);
+       PERFORM setval('users_id_seq', max_id, true);
     END $m$`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id BIGINT`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT`,
