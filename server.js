@@ -29,9 +29,13 @@ const memory = {
   listings: new Map(),
   rentals: new Map(),
   withdrawals: new Map(),
+  warnings: new Map(),
+  complaints: new Map(),
   nextListingId: 1,
   nextRentalId: 1,
-  nextWithdrawalId: 1
+  nextWithdrawalId: 1,
+  nextWarningId: 1,
+  nextComplaintId: 1
 };
 
 const states = new Map();
@@ -48,6 +52,9 @@ async function initDb() {
       telegram_id BIGINT PRIMARY KEY,
       username TEXT,
       balance NUMERIC(18,2) NOT NULL DEFAULT 0,
+      stars_balance NUMERIC(18,2) NOT NULL DEFAULT 0,
+      warnings INTEGER NOT NULL DEFAULT 0,
+      blocked BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -68,6 +75,32 @@ async function initDb() {
       seller_id BIGINT NOT NULL,
       amount NUMERIC(18,2) NOT NULL,
       status TEXT NOT NULL DEFAULT 'paid',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS warnings (
+      id SERIAL PRIMARY KEY,
+      telegram_id BIGINT NOT NULL,
+      reason TEXT NOT NULL,
+      admin_id BIGINT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS complaints (
+      id SERIAL PRIMARY KEY,
+      telegram_id BIGINT NOT NULL,
+      text TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS admin_actions (
+      id SERIAL PRIMARY KEY,
+      telegram_id BIGINT NOT NULL,
+      action TEXT NOT NULL,
+      amount NUMERIC(18,2),
+      details TEXT,
+      admin_id BIGINT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -123,6 +156,60 @@ async function addBalance(id, amount) {
   }
   if (!memory.users.has(id)) memory.users.set(id, { telegram_id: id, username: "", balance: 0 });
   memory.users.get(id).balance += Number(amount);
+}
+
+async function addStars(id, amount) {
+  if (pool) {
+    await dbQuery(
+      "INSERT INTO users (telegram_id, stars_balance) VALUES ($1,$2) ON CONFLICT (telegram_id) DO UPDATE SET stars_balance = users.stars_balance + $2",
+      [id, amount]
+    );
+    return;
+  }
+  if (!memory.users.has(id)) memory.users.set(id, { telegram_id:id, username:"", balance:0, stars_balance:0, warnings:0, blocked:false });
+  const u=memory.users.get(id); u.stars_balance=(u.stars_balance||0)+Number(amount);
+}
+
+async function getProfile(id) {
+  if (pool) {
+    const u=(await dbQuery("SELECT telegram_id,username,balance,stars_balance,warnings,blocked FROM users WHERE telegram_id=$1",[id])).rows[0];
+    const ws=(await dbQuery("SELECT id,reason,created_at FROM warnings WHERE telegram_id=$1 ORDER BY id DESC LIMIT 20",[id])).rows;
+    return {user:u,warnings:ws};
+  }
+  const u=memory.users.get(id)||{telegram_id:id,username:"",balance:0,stars_balance:0,warnings:0,blocked:false};
+  return {user:u,warnings:[...memory.warnings.values()].filter(x=>x.telegram_id===id).slice(-20).reverse()};
+}
+
+async function setBlocked(id, blocked) {
+  if (pool) { await dbQuery("INSERT INTO users (telegram_id,blocked) VALUES ($1,$2) ON CONFLICT (telegram_id) DO UPDATE SET blocked=$2",[id,blocked]); return; }
+  if (!memory.users.has(id)) memory.users.set(id,{telegram_id:id,username:"",balance:0,stars_balance:0,warnings:0,blocked:false});
+  memory.users.get(id).blocked=blocked;
+}
+
+async function addWarning(id, reason, adminId) {
+  if (pool) {
+    await dbQuery("INSERT INTO warnings (telegram_id,reason,admin_id) VALUES ($1,$2,$3)",[id,reason,adminId]);
+    await dbQuery("INSERT INTO users (telegram_id,warnings) VALUES ($1,1) ON CONFLICT (telegram_id) DO UPDATE SET warnings=users.warnings+1",[id]);
+    return;
+  }
+  if (!memory.users.has(id)) memory.users.set(id,{telegram_id:id,username:"",balance:0,stars_balance:0,warnings:0,blocked:false});
+  const u=memory.users.get(id); u.warnings=(u.warnings||0)+1;
+  const wid=memory.nextWarningId++; memory.warnings.set(wid,{id:wid,telegram_id:id,reason,admin_id:adminId});
+}
+
+async function createComplaint(id, complaint) {
+  if (pool) { const r=await dbQuery("INSERT INTO complaints (telegram_id,text) VALUES ($1,$2) RETURNING id",[id,complaint]); return r.rows[0].id; }
+  const idn=memory.nextComplaintId++; memory.complaints.set(idn,{id:idn,telegram_id:id,text:complaint,status:"open"}); return idn;
+}
+
+async function getOpenComplaints() {
+  if (pool) return (await dbQuery("SELECT * FROM complaints WHERE status='open' ORDER BY id ASC LIMIT 50")).rows;
+  return [...memory.complaints.values()].filter(x=>x.status==="open").slice(0,50);
+}
+
+async function closeComplaint(id) {
+  if (pool) { await dbQuery("UPDATE complaints SET status='closed' WHERE id=$1",[id]); return; }
+  const x=memory.complaints.get(id); if(x) x.status="closed";
 }
 
 async function subtractBalance(id, amount) {
@@ -324,7 +411,9 @@ function mainKeyboard() {
         [{ text: "🎁 Сдать в аренду", callback_data: "rent_out" }],
         [{ text: "📜 Условия сдачи NFT", callback_data: "terms" }],
         [{ text: "📦 Мои аренды", callback_data: "rentals" }],
+        [{ text: "👤 Профиль", callback_data: "profile" }],
         [{ text: "💰 Мой баланс", callback_data: "balance" }],
+        [{ text: "🚨 Подать жалобу", callback_data: "complaint" }],
         [{ text: "💸 Вывести средства", callback_data: "withdraw" }],
         [{ text: "⭐ Пополнить Stars", callback_data: "stars" }],
         [{ text: "💬 Поддержка", callback_data: "support" }]
@@ -363,6 +452,18 @@ bot.action("continue_rent", async (ctx) => {
   await ctx.editMessageText(
     "🎁 Отлично! Теперь напишите название подарка, который хотите сдать в аренду.\n\nНапример: «Весенний мишка» или название вашего NFT."
   );
+});
+
+bot.action("profile", async (ctx) => {
+  await ctx.answerCbQuery(); await ensureUser(ctx);
+  const p=await getProfile(ctx.from.id); const u=p.user;
+  const warnings=p.warnings.length ? p.warnings.map((w,i)=>`\\n${i+1}. ${w.reason}`).join("") : "\\nНет предупреждений.";
+  await ctx.editMessageText(`👤 Профиль\\n\\n🆔 ID: ${u.telegram_id}\\n👤 Username: ${u.username ? "@"+u.username : "не указан"}\\n💰 Баланс: ${Number(u.balance||0).toFixed(2)} ₽\\n⭐ Stars: ${Number(u.stars_balance||0).toFixed(0)}\\n⚠️ Предупреждений: ${Number(u.warnings||0)}\\n🔒 Статус: ${u.blocked ? "заблокирован" : "активен"}\\n\\n📋 Собранные предупреждения:${warnings}`,{reply_markup:{inline_keyboard:[[{text:"◀️ Назад",callback_data:"home"}]]}});
+});
+
+bot.action("complaint", async (ctx) => {
+  await ctx.answerCbQuery(); await ensureUser(ctx); states.set(ctx.from.id,{step:"complaint"});
+  await ctx.editMessageText("🚨 Напишите текст жалобы. Укажите, на кого или на какую аренду она относится:");
 });
 
 bot.action("balance", async (ctx) => {
@@ -474,6 +575,13 @@ bot.on("text", async (ctx, next) => {
   if (!state) return next();
 
   const text = ctx.message.text.trim();
+
+  if (state.step === "complaint") {
+    const cid=await createComplaint(ctx.from.id,text.slice(0,1000)); states.delete(ctx.from.id);
+    await ctx.reply(`✅ Жалоба №${cid} принята. Администрация рассмотрит её.`,mainKeyboard());
+    if(ADMIN_TELEGRAM_ID) await bot.telegram.sendMessage(ADMIN_TELEGRAM_ID,`🚨 Новая жалоба №${cid}\\n👤 ID: ${ctx.from.id}\\n📋 ${text.slice(0,1000)}`);
+    return;
+  }
 
   if (state.step === "admin_password") {
     if (!ADMIN_TELEGRAM_ID || String(ctx.from.id) !== String(ADMIN_TELEGRAM_ID)) {
