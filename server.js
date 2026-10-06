@@ -584,34 +584,52 @@ bot.on("text", async (ctx, next) => {
   }
 
   if (state.step === "admin_password") {
-    if (!ADMIN_TELEGRAM_ID || String(ctx.from.id) !== String(ADMIN_TELEGRAM_ID)) {
-      states.delete(ctx.from.id);
-      return;
-    }
+    if (!adminOnly(ctx)) { states.delete(ctx.from.id); return; }
     if (!ADMIN_PANEL_PASSWORD || text !== ADMIN_PANEL_PASSWORD) {
-      states.delete(ctx.from.id);
-      await ctx.reply("❌ Неверный пароль. Доступ к админ-панели закрыт.");
-      return;
+      states.delete(ctx.from.id); await ctx.reply("❌ Неверный пароль. Доступ закрыт."); return;
     }
     states.delete(ctx.from.id);
-    const list = await getPendingWithdrawals();
-    if (!list.length) {
-      await ctx.reply("🔐 Админ-панель открыта.\n\n💸 Заявок на вывод нет.");
-      return;
-    }
-    await ctx.reply(`🔐 Админ-панель открыта.\n\n💸 Ожидающих заявок: ${list.length}`);
-    for (const w of list) {
-      await ctx.reply(
-        `💸 Заявка №${w.id}\\n\\n👤 ID: ${w.telegram_id}\\n💰 Сумма: ${Number(w.amount).toFixed(2)} ₽\\n💳 Способ: ${w.method}\\n📋 Реквизиты: ${w.details}`,
-        { reply_markup: { inline_keyboard: [[
-          { text: "✅ Одобрить", callback_data: `wd:approve:${w.id}` },
-          { text: "❌ Отклонить", callback_data: `wd:reject:${w.id}` }
-        ]] } }
-      );
-    }
+    await ctx.reply("🔐 Админ-панель открыта.",{reply_markup:{inline_keyboard:[
+      [{text:"💸 Заявки на вывод",callback_data:"admin:withdrawals"}],
+      [{text:"🔄 Вернуть NFT",callback_data:"admin:return"}],
+      [{text:"🚨 Жалобы",callback_data:"admin:complaints"}],
+      [{text:"⭐ Начислить Stars",callback_data:"admin:stars"}],
+      [{text:"🔒 Заблокировать аккаунт",callback_data:"admin:block"}],
+      [{text:"⚠️ Дать предупреждение",callback_data:"admin:warn"}],
+      [{text:"👤 Профиль пользователя",callback_data:"admin:profile"}]
+    ]}});
     return;
   }
 
+  if (state.step === "admin_stars") {
+    const [uid,amount]=text.split(/\s+/); const n=Number(uid), a=Number(amount);
+    if(!Number.isInteger(n)||!Number.isFinite(a)||a<=0){await ctx.reply("❌ Формат: ID количество");return;}
+    await addStars(n,a); states.delete(ctx.from.id); await ctx.reply(`✅ Пользователю ${n} начислено ⭐ ${a} Stars.`); try{await bot.telegram.sendMessage(String(n),`⭐ Вам начислено ${a} Stars администрацией.`);}catch(e){} return;
+  }
+  if (state.step === "admin_block") {
+    const n=Number(text); if(!Number.isInteger(n)){await ctx.reply("❌ Неверный Telegram ID.");return;}
+    await setBlocked(n,true); states.delete(ctx.from.id); await ctx.reply(`🔒 Пользователь ${n} заблокирован.`); try{await bot.telegram.sendMessage(String(n),"🔒 Ваш аккаунт заблокирован администрацией.");}catch(e){} return;
+  }
+  if (state.step === "admin_warn") {
+    const [uid,...rest]=text.split("|"); const n=Number(uid.trim()), reason=rest.join("|").trim();
+    if(!Number.isInteger(n)||!reason){await ctx.reply("❌ Формат: ID | причина");return;}
+    await addWarning(n,reason,ctx.from.id); states.delete(ctx.from.id); await ctx.reply(`⚠️ Предупреждение выдано пользователю ${n}.`); try{await bot.telegram.sendMessage(String(n),`⚠️ Вам выдано предупреждение.\\nПричина: ${reason}`);}catch(e){} return;
+  }
+  if (state.step === "admin_profile") {
+    const n=Number(text); if(!Number.isInteger(n)){await ctx.reply("❌ Неверный Telegram ID.");return;}
+    const p=await getProfile(n); const u=p.user; states.delete(ctx.from.id);
+    if(!u) return ctx.reply("❌ Пользователь не найден.");
+    await ctx.reply(`👤 Профиль ${n}\\n💰 Баланс: ${Number(u.balance||0).toFixed(2)} ₽\\n⭐ Stars: ${Number(u.stars_balance||0)}\\n⚠️ Предупреждений: ${Number(u.warnings||0)}\\n🔒 ${u.blocked?"Заблокирован":"Активен"}`);
+    return;
+  }
+  if (state.step === "admin_return") {
+    const n=Number(text); if(!Number.isInteger(n)){await ctx.reply("❌ Введите номер аренды.");return;}
+    const r=await markRentalReturned(n); states.delete(ctx.from.id);
+    if(!r) return ctx.reply("❌ Аренда не найдена или уже возвращена.");
+    await ctx.reply(`🔄 Возврат по аренде №${n} оформлен.\\n\\n⚠️ Передача NFT обратно владельцу должна быть выполнена через поддерживаемый Telegram-механизм передачи подарка.`);
+    try{await bot.telegram.sendMessage(String(r.renter_id),`🔄 По аренде №${n} оформлен возврат NFT. Ожидайте дальнейших действий поддержки.`);}catch(e){}
+    return;
+  }
   if (state.step === "title") {
     state.title = text.slice(0, 100);
     state.step = "price";
@@ -723,6 +741,54 @@ bot.command("withdrawals", async (ctx) => {
   states.set(ctx.from.id, { step: "admin_password" });
   await ctx.reply("🔐 Введите пароль для доступа к админ-панели:");
 });
+async function markRentalReturned(id) {
+  if (pool) {
+    const r=await dbQuery("UPDATE rentals SET status='returned' WHERE id=$1 AND status='paid' RETURNING renter_id,seller_id,listing_id",[id]);
+    return r.rows[0] || null;
+  }
+  const r=memory.rentals.get(id);
+  if(!r || r.status!=="paid") return null;
+  r.status="returned"; return r;
+}
+
+function adminOnly(ctx) {
+  return ADMIN_TELEGRAM_ID && String(ctx.from.id)===String(ADMIN_TELEGRAM_ID);
+}
+
+bot.action(/^admin:(withdrawals|return|complaints|stars|block|warn|profile)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if(!adminOnly(ctx)) return ctx.reply("⛔ Нет доступа.");
+  const action=ctx.match[1];
+  if(action==="withdrawals") {
+    const list=await getPendingWithdrawals();
+    if(!list.length) return ctx.reply("💸 Заявок на вывод нет.");
+    for(const w of list) await ctx.reply(`💸 Заявка №${w.id}\\n👤 ID: ${w.telegram_id}\\n💰 ${Number(w.amount).toFixed(2)} ₽\\n💳 ${w.method}\\n📋 ${w.details}`,{reply_markup:{inline_keyboard:[[{text:"✅ Одобрить",callback_data:`wd:approve:${w.id}`},{text:"❌ Отклонить",callback_data:`wd:reject:${w.id}`}]]}});
+    return;
+  }
+  const prompts={
+    return:"🔄 Введите номер аренды для оформления возврата NFT:",
+    stars:"⭐ Введите через пробел: ID пользователя и количество Stars. Например: 123456789 50",
+    block:"🔒 Введите Telegram ID пользователя для блокировки:",
+    warn:"⚠️ Введите через |: ID пользователя | причина предупреждения",
+    profile:"👤 Введите Telegram ID пользователя для просмотра профиля:"
+  };
+  if(action==="complaints"){
+    const list=await getOpenComplaints();
+    if(!list.length) return ctx.reply("🚨 Открытых жалоб нет.");
+    for(const x of list) await ctx.reply(`🚨 Жалоба №${x.id}\\n👤 ID: ${x.telegram_id}\\n📋 ${x.text}`,{reply_markup:{inline_keyboard:[[{text:"✅ Закрыть",callback_data:`complaint:close:${x.id}`}]]}});
+    return;
+  }
+  states.set(ctx.from.id,{step:"admin_"+action});
+  await ctx.reply(prompts[action]);
+});
+
+bot.action(/^complaint:close:(\d+)$/,async ctx=>{
+  await ctx.answerCbQuery();
+  if(!adminOnly(ctx)) return ctx.reply("⛔ Нет доступа.");
+  await closeComplaint(Number(ctx.match[1]));
+  await ctx.editMessageText("✅ Жалоба закрыта.");
+});
+
 bot.action(/^wd:(approve|reject):(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   if (!ADMIN_TELEGRAM_ID || String(ctx.from.id) !== String(ADMIN_TELEGRAM_ID)) {
