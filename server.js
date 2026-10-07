@@ -90,7 +90,9 @@ const memory = {
   nextRentalId: 1,
   nextWithdrawalId: 1,
   nextWarningId: 1,
-  nextComplaintId: 1
+  nextComplaintId: 1,
+  tonWallets: new Map(),
+  tonChallenges: new Map()
 };
 
 const states = new Map();
@@ -166,6 +168,22 @@ async function initDb() {
       method TEXT NOT NULL,
       details TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS ton_wallets (
+      telegram_id BIGINT PRIMARY KEY,
+      address TEXT NOT NULL,
+      network TEXT NOT NULL,
+      verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS ton_challenges (
+      token TEXT PRIMARY KEY,
+      telegram_id BIGINT NOT NULL,
+      listing_id INTEGER NOT NULL,
+      payload TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
@@ -526,6 +544,116 @@ async function subtractBalance(id, amount) {
   return true;
 }
 
+
+function publicAppUrl() {
+  const value = process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "";
+  return value.replace(/\\/+$/, "");
+}
+function tonConnectDomain() {
+  const explicit = process.env.TON_CONNECT_DOMAIN || "";
+  if (explicit) return explicit;
+  try { return new URL(publicAppUrl()).hostname; } catch (_) { return ""; }
+}
+async function getTonWallet(telegramId) {
+  if (pool) {
+    const r = await dbQuery("SELECT telegram_id,address,network,verified_at FROM ton_wallets WHERE telegram_id=$1",[telegramId]);
+    return r.rows[0] || null;
+  }
+  return memory.tonWallets.get(Number(telegramId)) || null;
+}
+async function saveTonWallet(telegramId,address,network) {
+  if (pool) {
+    await dbQuery("INSERT INTO ton_wallets (telegram_id,address,network,verified_at) VALUES ($1,$2,$3,NOW()) ON CONFLICT (telegram_id) DO UPDATE SET address=EXCLUDED.address, network=EXCLUDED.network, verified_at=NOW()",[telegramId,address,network]);
+    return;
+  }
+  memory.tonWallets.set(Number(telegramId),{telegram_id:Number(telegramId),address,network,verified_at:new Date().toISOString()});
+}
+async function createTonChallenge(telegramId,listingId) {
+  const crypto=require("crypto");
+  const token=crypto.randomBytes(32).toString("hex");
+  const payload=crypto.randomBytes(24).toString("hex");
+  const expiresAt=new Date(Date.now()+15*60*1000);
+  if (pool) {
+    await dbQuery("UPDATE ton_challenges SET used=true WHERE telegram_id=$1 AND used=false",[telegramId]);
+    await dbQuery("INSERT INTO ton_challenges (token,telegram_id,listing_id,payload,expires_at) VALUES ($1,$2,$3,$4,$5)",[token,telegramId,listingId,payload,expiresAt]);
+  } else {
+    for (const [k,v] of memory.tonChallenges) if(v.telegram_id===Number(telegramId)&&!v.used) v.used=true;
+    memory.tonChallenges.set(token,{token,telegram_id:Number(telegramId),listing_id:Number(listingId),payload,expires_at:expiresAt,used:false});
+  }
+  return {token,payload,expiresAt};
+}
+async function getTonChallenge(token) {
+  if(pool){const r=await dbQuery("SELECT * FROM ton_challenges WHERE token=$1",[token]);return r.rows[0]||null;}
+  return memory.tonChallenges.get(token)||null;
+}
+async function consumeTonChallenge(token) {
+  if(pool){
+    const r=await dbQuery("UPDATE ton_challenges SET used=true WHERE token=$1 AND used=false AND expires_at>NOW() RETURNING *",[token]);
+    return r.rows[0]||null;
+  }
+  const c=memory.tonChallenges.get(token);
+  if(!c||c.used||new Date(c.expires_at).getTime()<=Date.now()) return null;
+  c.used=true; return c;
+}
+function extractTonPublicKey(stateInit) {
+  const ton=require("@ton/ton");
+  const {Buffer}=require("buffer");
+  const {
+    WalletContractV1R1,WalletContractV1R2,WalletContractV1R3,
+    WalletContractV2R1,WalletContractV2R2,WalletContractV3R1,
+    WalletContractV3R2,WalletContractV4,WalletContractV5R1
+  }=ton;
+  const loads=[
+    [WalletContractV1R1,cs=>{cs.loadUint(32);return cs.loadBuffer(32);}],
+    [WalletContractV1R2,cs=>{cs.loadUint(32);return cs.loadBuffer(32);}],
+    [WalletContractV1R3,cs=>{cs.loadUint(32);return cs.loadBuffer(32);}],
+    [WalletContractV2R1,cs=>{cs.loadUint(32);return cs.loadBuffer(32);}],
+    [WalletContractV2R2,cs=>{cs.loadUint(32);return cs.loadBuffer(32);}],
+    [WalletContractV3R1,cs=>{cs.loadUint(32);cs.loadUint(32);return cs.loadBuffer(32);}],
+    [WalletContractV3R2,cs=>{cs.loadUint(32);cs.loadUint(32);return cs.loadBuffer(32);}],
+    [WalletContractV4,cs=>{cs.loadUint(32);cs.loadUint(32);return cs.loadBuffer(32);}],
+    [WalletContractV5R1,cs=>{cs.loadBoolean();cs.loadUint(32);cs.loadUint(32);return cs.loadBuffer(32);}]
+  ];
+  const cell=ton.Cell.fromBase64(stateInit);
+  const state=ton.loadStateInit(cell.beginParse());
+  if(!state.code||!state.data) throw new Error("invalid wallet state");
+  for(const [contract,load] of loads){
+    try{
+      const code=contract.create({workchain:0,publicKey:Buffer.alloc(32)}).init.code;
+      if(code.equals(state.code)) return load(state.data.beginParse());
+    }catch(_){}
+  }
+  return null;
+}
+async function verifyTonProof(input,expectedPayload) {
+  const ton=require("@ton/ton");
+  const {sha256}=require("@ton/crypto");
+  const nacl=require("tweetnacl");
+  const {Buffer}=require("buffer");
+  const proof=input.proof;
+  if(!proof||!proof.signature||!proof.payload||!proof.domain) throw new Error("missing proof");
+  if(String(proof.payload)!==String(expectedPayload)) throw new Error("wrong payload");
+  const domain=tonConnectDomain();
+  if(!domain||proof.domain.value!==domain) throw new Error("wrong domain");
+  if(String(input.network)!=="-239") throw new Error("wrong network");
+  const ts=Number(proof.timestamp),now=Math.floor(Date.now()/1000);
+  if(!Number.isFinite(ts)||Math.abs(now-ts)>15*60) throw new Error("proof expired");
+  const address=ton.Address.parse(input.address);
+  const state=ton.loadStateInit(ton.Cell.fromBase64(input.walletStateInit).beginParse());
+  const derived=ton.contractAddress(address.workChain,state);
+  if(!derived.equals(address)) throw new Error("walletStateInit mismatch");
+  const publicKey=extractTonPublicKey(input.walletStateInit);
+  if(!publicKey) throw new Error("unsupported wallet contract");
+  const domainBytes=Buffer.from(proof.domain.value,"utf8");
+  if(Number(proof.domain.lengthBytes)!==domainBytes.length) throw new Error("domain length mismatch");
+  const wc=Buffer.alloc(4);wc.writeInt32BE(address.workChain);
+  const domainLen=Buffer.alloc(4);domainLen.writeUInt32LE(domainBytes.length);
+  const timestamp=Buffer.alloc(8);timestamp.writeBigUInt64LE(BigInt(ts));
+  const message=Buffer.concat([Buffer.from("ton-proof-item-v2/","utf8"),wc,Buffer.from(address.hash),domainLen,domainBytes,timestamp,Buffer.from(String(proof.payload),"utf8")]);
+  const inner=await sha256(message);
+  const digest=await sha256(Buffer.concat([Buffer.from([0xff,0xff]),Buffer.from("ton-connect","utf8"),inner]));
+  return nacl.sign.detached.verify(new Uint8Array(digest),new Uint8Array(Buffer.from(proof.signature,"base64")),new Uint8Array(publicKey));
+}
 async function createListing(sellerId, title, price, durationDays, status = "active") {
   if (pool) {
     const r = await dbQuery(
@@ -818,22 +946,44 @@ bot.action("catalog", async (ctx) => {
   await ctx.editMessageText("🎁 Доступные подарки:", { reply_markup: { inline_keyboard: rows } });
 });
 
-bot.action(/^rent:(\d+)$/, async (ctx) => {
+bot.action(/^rent:(\\d+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   await ensureUser(ctx);
   const listing = await getListing(Number(ctx.match[1]));
+  if (!listing) return ctx.editMessageText("❌ Это объявление больше недоступно.");
 
-  if (!listing) {
-    await ctx.editMessageText("❌ Это объявление больше недоступно.");
+  const wallet = await getTonWallet(ctx.from.id);
+  if (!wallet || wallet.network !== "-239") {
+    const challenge = await createTonChallenge(ctx.from.id, listing.id);
+    const url = publicAppUrl() + "/connect-ton?token=" + encodeURIComponent(challenge.token);
+    await ctx.reply(
+      "🔐 Для аренды NFT обязательно подключите и подтвердите TON-кошелёк.\n\nКошелёк нужен только для подтверждения владения. Seed-фразу и приватный ключ бот не запрашивает.",
+      { reply_markup: { inline_keyboard: [[{ text: "🔗 Подключить TON-кошелёк", url }]] } }
+    );
     return;
   }
 
+  await ctx.reply(
+    "✅ TON-кошелёк подтверждён.\n\n👛 " + wallet.address +
+    "\n\n🎁 " + listing.title +
+    "\n📅 Срок: " + listing.duration_days + " д.\n⭐ Оплата: Telegram Stars",
+    { reply_markup: { inline_keyboard: [[{ text: "⭐ Оплатить Stars", callback_data: "payrent:" + listing.id }],[{ text: "◀️ Назад", callback_data: "home" }]] } }
+  );
+});
+
+bot.action(/^payrent:(\\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  await ensureUser(ctx);
+  const listing = await getListing(Number(ctx.match[1]));
+  if (!listing) return ctx.reply("❌ Это объявление больше недоступно.");
+  const wallet = await getTonWallet(ctx.from.id);
+  if (!wallet || wallet.network !== "-239") return ctx.reply("🔐 Сначала подключите TON-кошелёк.");
   await ctx.replyWithInvoice({
-    title: `Аренда: ${listing.title}`,
-    description: `Аренда уникального подарка на ${listing.duration_days} д.`,
+    title: "Аренда: " + listing.title,
+    description: "Аренда уникального подарка на " + listing.duration_days + " д.",
     payload: JSON.stringify({ type: "rental", listingId: listing.id, renterId: ctx.from.id }),
     currency: "XTR",
-    prices: [{ label: `Аренда ${listing.title}`, amount: Math.max(1, Math.round(Number(listing.price))) }]
+    prices: [{ label: "Аренда " + listing.title, amount: Math.max(1, Math.round(Number(listing.price))) }]
   });
 });
 
@@ -1310,6 +1460,38 @@ bot.action("support", async (ctx) => {
   await editVisual(ctx, "support", "💬 Поддержка: напишите сюда свой вопрос.");
 });
 
+
+app.get("/tonconnect-manifest.json",(_req,res)=>{
+  const base=publicAppUrl();
+  res.json({url:base,name:"russiat-gift",iconUrl:base+"/tonconnect-icon.png",termsOfUseUrl:base+"/",privacyPolicyUrl:base+"/"});
+});
+app.get("/tonconnect-icon.png",(_req,res)=>{
+  const png=Buffer.from(process.env.TON_CONNECT_ICON_BASE64||"","base64");
+  if(!png.length)return res.status(404).end();
+  res.set("Content-Type","image/png");res.send(png);
+});
+app.get("/connect-ton",async(req,res)=>{
+  const token=String(req.query.token||"");
+  const challenge=await getTonChallenge(token);
+  if(!challenge||challenge.used||new Date(challenge.expires_at).getTime()<=Date.now()) return res.status(410).send("<h2>ссылка устарела</h2><p>вернитесь в бота и нажмите подключить TON-кошелёк ещё раз.</p>");
+  const base=publicAppUrl();
+  const html='<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TON кошелёк</title><style>body{margin:0;background:#f4f6f8;font-family:Arial,sans-serif;display:grid;place-items:center;min-height:100vh;color:#111}.card{width:min(92vw,430px);background:#fff;border-radius:24px;padding:28px;box-sizing:border-box;box-shadow:0 12px 40px #0001;text-align:center}.muted{color:#667085;line-height:1.5}.ok{display:none;color:#087f5b;font-weight:700;margin-top:18px}.err{color:#d92d20;margin-top:14px;min-height:20px}</style></head><body><div class="card"><h1>🔐 подключение TON</h1><p class="muted">для аренды NFT нужно подтвердить владение TON-кошельком.</p><div id="ton-connect"></div><div id="status" class="muted">ожидаем подключение...</div><div id="ok" class="ok">✅ кошелёк подтверждён!<br>вернитесь в Telegram и продолжите аренду.</div><div id="err" class="err"></div></div><script src="https://unpkg.com/@tonconnect/ui@latest/dist/tonconnect-ui.min.js"></script><script>(async()=>{const token="${token}",payload="${challenge.payload}",manifest="${base}/tonconnect-manifest.json";const ui=new TON_CONNECT_UI.TonConnectUI({manifestUrl:manifest,buttonRootId:"ton-connect"});ui.uiOptions={language:"ru"};ui.setConnectRequestParameters({state:"ready",value:{tonProof:payload}});ui.onStatusChange(async wallet=>{if(!wallet)return;const proof=wallet.connectItems&&wallet.connectItems.tonProof;if(!proof||!("proof" in proof)){document.getElementById("err").textContent="❌ этот кошелёк не вернул TON Proof. выберите другой TON-кошелёк.";return;}document.getElementById("status").textContent="проверяем владение кошельком...";try{const r=await fetch("/api/tonconnect/verify",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({token,proof:proof.proof,address:wallet.account.address,walletStateInit:wallet.account.walletStateInit,network:wallet.account.chain})});const data=await r.json();if(!r.ok||!data.ok)throw new Error(data.error||"проверка не пройдена");document.getElementById("status").textContent="кошелёк подключён";document.getElementById("ok").style.display="block";}catch(e){document.getElementById("err").textContent="❌ "+e.message;}});})();</script></body></html>';
+  res.set("Content-Type","text/html; charset=utf-8").send(html);
+});
+app.post("/api/tonconnect/verify",async(req,res)=>{
+  try{
+    const token=String(req.body.token||"");
+    const challenge=await getTonChallenge(token);
+    if(!challenge||challenge.used||new Date(challenge.expires_at).getTime()<=Date.now()) return res.status(400).json({ok:false,error:"ссылка подключения устарела"});
+    const valid=await verifyTonProof(req.body,challenge.payload);
+    if(!valid)return res.status(400).json({ok:false,error:"TON Proof не прошёл проверку"});
+    const consumed=await consumeTonChallenge(token);
+    if(!consumed)return res.status(409).json({ok:false,error:"проверка уже использована"});
+    await saveTonWallet(challenge.telegram_id,req.body.address,req.body.network);
+    try{await bot.telegram.sendMessage(String(challenge.telegram_id),"✅ TON-кошелёк успешно подключён и подтверждён. Теперь вернитесь к аренде NFT.");}catch(e){}
+    return res.json({ok:true,address:req.body.address});
+  }catch(err){console.error("TON Connect verify error:",err);return res.status(400).json({ok:false,error:"не удалось подтвердить TON-кошелёк"});}
+});
 app.get("/", (_req, res) => {
   res.json({ ok: true, service: "Telegram Gift Rental Bot" });
 });
