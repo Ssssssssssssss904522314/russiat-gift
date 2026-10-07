@@ -547,7 +547,7 @@ async function subtractBalance(id, amount) {
 
 function publicAppUrl() {
   const value = process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "";
-  return value.replace(/\\/+$/, "");
+  return value.replace(/\/+$/, "");
 }
 function tonConnectDomain() {
   const explicit = process.env.TON_CONNECT_DOMAIN || "";
