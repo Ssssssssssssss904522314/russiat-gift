@@ -1463,7 +1463,7 @@ bot.action("support", async (ctx) => {
 
 app.get("/tonconnect-manifest.json",(_req,res)=>{
   const base=publicAppUrl();
-  res.json({url:base,name:"russiat-gift",iconUrl:base+"/tonconnect-icon.png",termsOfUseUrl:base+"/",privacyPolicyUrl:base+"/"});
+  res.json({url:base,name:"russiat-gift",iconUrl:"https://telegram.org/img/t_logo.png",termsOfUseUrl:base+"/",privacyPolicyUrl:base+"/"});
 });
 app.get("/tonconnect-icon.png",(_req,res)=>{
   const png=Buffer.from(process.env.TON_CONNECT_ICON_BASE64||"","base64");
