@@ -946,7 +946,7 @@ bot.action("catalog", async (ctx) => {
   await ctx.editMessageText("🎁 Доступные подарки:", { reply_markup: { inline_keyboard: rows } });
 });
 
-bot.action(/^rent:(\\d+)$/, async (ctx) => {
+bot.action(/^rent:(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   await ensureUser(ctx);
   const listing = await getListing(Number(ctx.match[1]));
@@ -971,7 +971,7 @@ bot.action(/^rent:(\\d+)$/, async (ctx) => {
   );
 });
 
-bot.action(/^payrent:(\\d+)$/, async (ctx) => {
+bot.action(/^payrent:(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   await ensureUser(ctx);
   const listing = await getListing(Number(ctx.match[1]));
